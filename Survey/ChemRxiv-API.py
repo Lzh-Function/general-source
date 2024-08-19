@@ -9,7 +9,7 @@ limit = ""
 searchDateFrom = "2015-01-01T00:00:00.000Z"
 skip = 0
 # categoryIds: get from URL of the category dashboard
-categoryIds = "605c72ef153207001f6470ce"
+categoryIds = ""
 
 allhits = pd.DataFrame([], columns=["title", "abstract", "published date", "doi"])
 
