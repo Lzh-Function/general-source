@@ -1,2 +1,2 @@
 # general source
-storage (just for private use)
+general source for cheminformatics research.
