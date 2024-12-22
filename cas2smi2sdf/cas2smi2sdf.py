@@ -1,140 +1,240 @@
 import numpy as np
 import pandas as pd
+
 from pubchempy import get_properties
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from rdkit.Chem.SaltRemover import SaltRemover
 from openbabel import pybel
+
 import os
+from pathlib import Path
 from argparse import ArgumentParser
 import requests
 from datetime import datetime
+import pprint
+
+"""
+args:
+    mode: cas2smi or smi2sdf or cas2sdf
+    --url: slack notification API (if you want to use)
+
+    if cas2smi:
+        --cas_csv: path of the csv with CAS (!CONFIRM CSV NAME IS YOUR PROJECT NAME!)
+        --cas_col: column name of the CAS
+
+    if smi2sdf:
+        --smi_csv: path of the csv with SMILES
+        --smi_col: column name of the SMILES
+        --sdf_dir: directory path of the sdfs (don't have to create dir at first)
+
+    if cas2sdf:
+        --cas_csv: path of the csv with CAS (!CONFIRM CSV NAME IS YOUR PROJECT NAME!)
+        --cas_col: column name of the CAS
+        --sdf_dir: directory path of the sdfs (don't have to create dir at first)
+"""
+
 
 # cas to smiles
 def cas2smi(args):
-    """
-    input
-    df_path ... path of .csv file contained cas-number(column name: cas)
-    url ... API (notification)
-    csv_dir_path ... path of the directory which you want to put in df_smiles(.csv)
-    name ... result(.csv) name
+    """_summary_
 
-    output
-    df_smiles ... DataFrame of SMILES 
+    Parameters
+    ----------
+    args
+
+    Returns
+    -------
+    df_smiles : pd.DataFrame
+        dataframe contains SMILES and other information
     """
 
-    df_cas = pd.read_csv(args.df_path, index_col=0)
-    all_cas = df_cas["cas"]
-    length = len(all_cas)
+    slack = True if args.url is not None else False
+
+    cas = pd.read_csv(args.cas_csv, index_col=0)
+    cas = cas[args.cas_col]
+    cas = cas.dropna().drop_duplicates()
+    length = len(cas)
     df_smiles = pd.DataFrame([], columns=["CID", "CAS", "IsomericSMILES", "XLogP", "MolecularWeight", "MolecularFormula", "IUPACName"])
     properties = ["IsomericSMILES", "XLogP", "MolecularWeight", "MolecularFormula", "IUPACName"]
     
-    payload = {"text": f"cas2smi start: {length}"}
-    r = requests.post(url=args.url, json=payload)
+    if slack:
+        payload = {"text": f"cas2smi start: {length}"}
+        r = requests.post(url=args.url, json=payload)
 
     # get_properties
-    cas_done = []
-    for i, cas in enumerate(all_cas):
-        if (cas not in cas_done) and (cas != np.nan):
-            try:
-                info = get_properties(properties, cas, "name", as_dataframe=True)
-            except:
-                cas_done.append(cas)
+    for i, c in enumerate(cas):
+        try:
+            info = get_properties(properties, cas, "name", as_dataframe=True)
+        except:
+            if slack:
                 if (i+1) % 10000 == 0:
                     payload = {"text": f"cas2smi {i+1}/{length} done."}
                     r = requests.post(url=args.url, json=payload)
-                    continue
-        else:
             continue
         
-        info["CAS"] = cas
+        info["CAS"] = c
         info["CID"] = info.index
 
         df_smiles = pd.concat([df_smiles, info], axis=0)
-        cas_done.append(cas)
-
-        if (i+1) % 10000 == 0:
-            payload = {"text": f"cas2smi {i+1}/{length} done."}
-            r = requests.post(url=args.url, json=payload)
+        
+        if slack:
+            if (i+1) % 10000 == 0:
+                payload = {"text": f"cas2smi {i+1}/{length} done."}
+                r = requests.post(url=args.url, json=payload)
     
     df_smiles.reset_index(inplace=True, drop=True)
-    df_smiles.to_csv(os.path.join(args.csv_dir_path, f"{datetime.now().strftime("%Y%m%d")}_{args.name}.csv"))
+    df_smiles.to_csv(os.path.join(os.path.dirname(args.cas_csv), f"{datetime.now().strftime("%Y%m%d")}_{args.proj_name}_SMILES.csv"))
     
-    payload = {"text": "cas2smi finished."}
-    r = requests.post(url=args.url, json=payload)
+    if slack:
+        payload = {"text": "cas2smi finished."}
+        r = requests.post(url=args.url, json=payload)
 
     return df_smiles
 
+
 # split
-def split_longest(smi):
-    smi = smi.split(".")
-    max_index = max(range(len(smi)), key=lambda i: len(smi[i]))
-    return smi[max_index]
+def salt_remove(smiles):
+    """_summary_
+
+    Parameters
+    ----------
+    smiles : str
+        SMILES
+
+    Returns
+    -------
+    split : str
+        SMILES without salts or the largest part of the SMILES
+    """
+    remover = SaltRemover()
+    try:
+        s2 = Chem.MolToSmiles(remover.StripMol(Chem.MolFromSmiles(smiles), dontRemoveEverything=True), isomericSmiles=True)
+        if "." in s2:
+            try:
+                mol_frags = Chem.GetMolFrags(Chem.MolFromSmiles(s2), asMols=True)
+                largest = None
+                largest_size = 0
+                for mol in mol_frags:
+                    size = mol.GetNumAtoms()
+                    if size > largest_size:
+                        largest = mol
+                        largest_size = size
+                s2 = Chem.MolToSmiles(largest)
+                return s2
+            except:
+                s2 = s2.split(".")
+                max_index = max(range(len(s2)), key=lambda i: len(s2[i]))
+                return s2[max_index]
+    except:
+        smiles = smiles.split(".")
+        max_index = max(range(len(smiles)), key=lambda i: len(smiles[i]))
+        return smiles[max_index]
+    return s2
+
 
 # smiles to sdf
 def smi2sdf(df_smiles, args):
-    """
-    input
-    url ... API (notification)
-    sdf_dir_path ... path of the directory which you want to put in .sdf file
+    """_summary_
 
-    output
-    failed ... list of SMILES which failed to generate structure
+    Parameters
+    ----------
+    df_smiles : pd.DataFrame
+        dataframe contains SMILES
+    args
+
+    Returns
+    -------
+    failed : dict
+        SMILES which failed to get sdf
     """
-    smiles = df_smiles["IsomericSMILES"]
+
+    slack = True if args.url is not None else False
+
+    smiles = df_smiles[args.smi_col]
     
-    smiles.apply(split_longest)
+    smiles.apply(salt_remove)
     length = len(smiles)
 
-    payload = {"text": f"smi2sdf start: {length}"}
-    r = requests.post(url=args.url, json=payload)
+    if slack:
+        payload = {"text": f"smi2sdf start: {length}"}
+        r = requests.post(url=args.url, json=payload)
 
-    failed = []
+    failed = {}
 
     for i, smi in enumerate(smiles):
         try:
             ligs = pybel.readstring("smi", smi)
             ligs.localopt()
         except:
-            failed.append([i, smi])
+            failed[i] = smi
+            if slack:
+                if (i+1) % 10000 == 0:
+                    payload = {"text": f"smi2sdf {i+1}/{length} done."}
+                    r = requests.post(url=args.url, json=payload)
+            continue
+
+        fileout = os.path.join(args.sdf_dir, f"{i}.sdf")
+        ligs.write("sdf", fileout)
+
+        if slack:
             if (i+1) % 10000 == 0:
                 payload = {"text": f"smi2sdf {i+1}/{length} done."}
                 r = requests.post(url=args.url, json=payload)
-            continue
-
-        fileout = os.path.join(args.sdf_dir_path, f"{i}.sdf")
-        ligs.write("sdf", fileout)
-
-        if (i+1) % 10000 == 0:
-            payload = {"text": f"smi2sdf {i+1}/{length} done."}
-            r = requests.post(url=args.url, json=payload)
     
-    payload = {"text": "smi2sdf finished."}
-    r = requests.post(url=args.url, json=payload)
+    if slack:
+        payload = {"text": "smi2sdf finished."}
+        r = requests.post(url=args.url, json=payload)
 
     return failed
 
+
 def main(args):
-    df_smiles = cas2smi(args)
-    failed = smi2sdf(df_smiles, args)
-    if len(failed) != 0:
-        if len(failed) <= 10:
-            for smi in failed:
-                print(f"failed: {smi[1]}")
+
+    if args.mode == "cas2sdf":
+        df_smiles = cas2smi(args)
+        args.smi_col = "IsomericSMILES"
+        os.makedirs(args.sdf_dir, exist_ok=True)
+        failed = smi2sdf(df_smiles, args)
+        if len(failed) != 0:
+            if len(failed) <= 10:
+                pprint.pprint(failed, width=1)
+            else:
+                print("failed smi were more than 10")
+            with open(os.path.join(os.path.dirname(args.cas_csv), f"{datetime.now().strftime("%Y%m%d")}_{args.proj_name}_failed.txt"), "w") as f:
+                for idx, smi in failed.items():
+                    f.write(str(idx) + "  " + str(smi) + "\n")
         else:
-            print("failed smi were more than 10")
-        with open(os.path.join(args.csv_dir_path, f"{datetime.now().strftime("%Y%m%d")}_{args.name}_failed.txt"), "w") as f:
-            for smi in failed:
-                f.write(str(smi) + "\n")
-    else:
-        print("no failed smi")
+            print("no failed smi")
+
+    if args.mode == "cas2smi":
+        _ = cas2smi(args)
+
+    if args.mode == "smi2sdf":
+        os.makedirs(args.sdf_dir, exist_ok=True)
+        df_smiles = pd.read_csv(args.smi_csv, index_col=0)
+        failed = smi2sdf(df_smiles, args)
+        if len(failed) != 0:
+            if len(failed) <= 10:
+                pprint.pprint(failed, width=1)
+            else:
+                print("failed smi were more than 10")
+            with open(os.path.join(os.path.dirname(args.cas_csv), f"{datetime.now().strftime("%Y%m%d")}_{args.proj_name}_failed.txt"), "w") as f:
+                for idx, smi in failed.items():
+                    f.write(str(idx) + "  " + str(smi) + "\n")
+        else:
+            print("no failed smi")
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("--df_path")
-    parser.add_argument("--csv_dir_path")
-    parser.add_argument("--name")
-    parser.add_argument("--sdf_dir_path")
+    parser.add_argument("mode")
     parser.add_argument("--url")
+    parser.add_argument("--cas_csv")
+    parser.add_argument("--cas_col")
+    parser.add_argument("--smi_csv")
+    parser.add_argument("--smi_col")
+    parser.add_argument("--sdf_dir")
     args = parser.parse_args()
+    args.proj_name = Path(args.cas_csv).stem
     
     main(args)
