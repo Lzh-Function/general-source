@@ -235,6 +235,9 @@ if __name__ == "__main__":
     parser.add_argument("--smi_col")
     parser.add_argument("--sdf_dir")
     args = parser.parse_args()
-    args.proj_name = Path(args.cas_csv).stem
+    if args.cas_csv is not None:
+        args.proj_name = Path(args.cas_csv).stem
+    else:
+        args.proj_name = Path(args.smi_csv).stem
     
     main(args)
